@@ -1,5 +1,6 @@
 package zerrium;
 
+import org.apache.commons.io.FileUtils;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.OfflinePlayer;
@@ -27,7 +28,7 @@ public class Zstats extends JavaPlugin{
 
     @Override
     public void onEnable() {
-        System.out.println(ChatColor.YELLOW+"[Zstats] v0.7 by zerrium");
+        System.out.println(ChatColor.YELLOW+"[Zstats] v0.8 by zerrium");
         getServer().getPluginManager().registerEvents(new SpigotListener(), this);
         Objects.requireNonNull(this.getCommand("zstats")).setExecutor(new ZUpdater());
         System.out.println(ChatColor.YELLOW+"[Zstats] Connecting to MySQL database...");
@@ -90,20 +91,16 @@ public class Zstats extends JavaPlugin{
                 System.out.println(ChatColor.YELLOW+"[Zstats] Found statistic data of "+ counter +" players.");
             }else{
                     int c = 0;
-                    try{
-                        do{
-                            if(rss.getString("uuid").equals("000")) continue;
-                            zplayer.add(new ZPlayer(UUID.fromString(rss.getString("uuid")), rss.getString("name")));
-                            if(debug){
-                                System.out.println(zplayer.get(c).uuid+" --- "+zplayer.get(c).name);
-                            }
-                            c++;
+                    do{
+                        if(rss.getString("uuid").equals("000")) continue;
+                        zplayer.add(new ZPlayer(UUID.fromString(rss.getString("uuid")), rss.getString("name")));
+                        if(debug){
+                            System.out.println(zplayer.get(c).uuid+" --- "+zplayer.get(c).name);
                         }
-                        while(rss.next());
-                        System.out.println(ChatColor.YELLOW+"[Zstats] Found statistic data of "+ c +" players.");
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
+                        c++;
                     }
+                    while(rss.next());
+                    System.out.println(ChatColor.YELLOW+"[Zstats] Found statistic data of "+ c +" players.");
             }
         } catch (SQLException throwables) {
             System.out.println(ChatColor.YELLOW+"[Zstats]"+ChatColor.RED+" An SQL error occured:");
@@ -149,5 +146,34 @@ public class Zstats extends JavaPlugin{
     public void onDisable() {
         SqlCon.closeConnection();
         System.out.println(ChatColor.YELLOW+"[Zstats] Disabling plugin...");
+    }
+
+    protected static void updateWorldSize(){
+        end_size = 0L;
+        nether_size = 0L;
+        world_size = 0L;
+        total_size = 0L;
+
+        Bukkit.getWorlds().forEach(i ->{
+            switch(i.getEnvironment()){
+                case NORMAL:
+                    world_size = FileUtils.sizeOfDirectory(i.getWorldFolder());
+                    total_size += world_size;
+                    break;
+                case NETHER:
+                    nether_size = FileUtils.sizeOfDirectory(i.getWorldFolder());
+                    total_size += nether_size;
+                    break;
+                case THE_END:
+                    end_size = FileUtils.sizeOfDirectory(i.getWorldFolder());
+                    total_size += end_size;
+                    break;
+                default:
+                    total_size += total_size;
+                    break;
+            }
+            if(debug) System.out.println("Got world size of "+i.getName());
+        });
+        if(debug) System.out.println("Total size "+total_size);
     }
 }

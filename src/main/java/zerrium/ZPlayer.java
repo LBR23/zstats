@@ -1,10 +1,7 @@
 package zerrium;
 
-import github.scarsz.discordsrv.DiscordSRV;
 import org.bukkit.*;
 import org.bukkit.entity.EntityType;
-import org.bukkit.scheduler.BukkitRunnable;
-import org.apache.commons.io.FileUtils;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -17,6 +14,7 @@ public class ZPlayer {
     String name;
     UUID uuid;
     long afk_time, last_played;
+    boolean is_updating; //flag to prevent double update to the same Object simultaneously
     HashMap<String, Long> x; //convert those stupid many attributes into a hashmap
     LinkedHashMap<Material, Long> craft;
     LinkedHashMap<Material, Long> place;
@@ -24,61 +22,42 @@ public class ZPlayer {
     LinkedHashMap<EntityType, Long> slain;
     LinkedHashMap<EntityType, Long> mob;
 
-    public ZPlayer(UUID uuid, String name){
+    public ZPlayer(UUID uuid, String name) throws SQLException {
         this.uuid = uuid;
         this.name = name;
-        BukkitRunnable rr = new BukkitRunnable() {
-            @Override
-            public void run() {
-                Connection connection = null;
-                PreparedStatement pss = null;
-                ResultSet rs = null;
-                try {
-                    connection = SqlCon.openConnection();
-                    if(Zstats.debug) System.out.println("Get player AFK time from db");
-                    pss = connection.prepareStatement("select val from stats where uuid=? and stat=?");
-                    pss.setString(1, uuid.toString());
-                    pss.setString(2, "z:afk_time");
-                    rs = pss.executeQuery();
-                    if (!rs.next()) {
-                        if(Zstats.debug) System.out.println("AFK stat Not found. set it to 0");
-                        afk_time = 0L;
-                    }else{
-                        afk_time = rs.getLong(1);
-                        if(Zstats.debug) System.out.println("AFK value: " + afk_time);
-                    }
 
-                    if(Zstats.debug) System.out.println("Get player last played time from db");
-                    pss = connection.prepareStatement("select val from stats where uuid=? and stat=?");
-                    pss.setString(1, uuid.toString());
-                    pss.setString(2, "z:last_played");
-                    rs = pss.executeQuery();
-                    if (!rs.next()) {
-                        OfflinePlayer p = Bukkit.getOfflinePlayer(uuid);
-                        if(Zstats.debug) System.out.println("Last played stat Not found. set it to OfflinePlayer#getLastPlayed");
-                        last_played = p.getLastPlayed()/1000;
-                    }else{
-                        last_played = rs.getLong(1);
-                        if(Zstats.debug) System.out.println("Last played value: " + last_played);
-                    }
-                } catch (SQLException throwables) {
-                    throwables.printStackTrace();
-                } finally {
-                    try {
-                        assert pss != null;
-                        pss.close();
+        Connection connection = SqlCon.openConnection();
+        if(Zstats.debug) System.out.println("Get player AFK time from db");
+        PreparedStatement pss = connection.prepareStatement("select val from stats where uuid=? and stat=?");
+        pss.setString(1, uuid.toString());
+        pss.setString(2, "z:afk_time");
+        ResultSet rs = pss.executeQuery();
+        if (!rs.next()) {
+            if(Zstats.debug) System.out.println("AFK stat Not found. set it to 0");
+            afk_time = 0L;
+        }else{
+            afk_time = rs.getLong(1);
+            if(Zstats.debug) System.out.println("AFK value: " + afk_time);
+        }
 
-                        assert rs != null;
-                        rs.close();
+        if(Zstats.debug) System.out.println("Get player last played time from db");
+        pss = connection.prepareStatement("select val from stats where uuid=? and stat=?");
+        pss.setString(1, uuid.toString());
+        pss.setString(2, "z:last_played");
+        rs = pss.executeQuery();
+        if (!rs.next()) {
+            OfflinePlayer p = Bukkit.getOfflinePlayer(uuid);
+            if(Zstats.debug) System.out.println("Last played stat Not found. set it to OfflinePlayer#getLastPlayed");
+            last_played = p.getLastPlayed()/1000;
+        }else{
+            last_played = rs.getLong(1);
+            if(Zstats.debug) System.out.println("Last played value: " + last_played);
+        }
 
-                        connection.close();
-                    } catch (Exception e) {
-                        if(Zstats.debug) System.out.println("[Zstats] "+ e );
-                    }
-                }
-            }
-        };
-        rr.runTaskAsynchronously(Zstats.getPlugin(Zstats.class));
+        pss.close();
+        rs.close();
+        connection.close();
+        this.is_updating = false;
     }
 
     public ZPlayer(UUID uuid){
@@ -111,13 +90,13 @@ public class ZPlayer {
         return uuid.hashCode();
     }
 
-    public void updateStat(Connection connection){
-        x = new HashMap<>();
-        craft = new LinkedHashMap<>();
-        place = new LinkedHashMap<>();
-        mine = new LinkedHashMap<>();
-        slain = new LinkedHashMap<>();
-        mob = new LinkedHashMap<>();
+    private void clearStat(){
+        this.x = new HashMap<>();
+        this.craft = new LinkedHashMap<>();
+        this.place = new LinkedHashMap<>();
+        this.mine = new LinkedHashMap<>();
+        this.slain = new LinkedHashMap<>();
+        this.mob = new LinkedHashMap<>();
         this.x.put(Statistic.PLAY_ONE_MINUTE.toString(), 0L);
         this.x.put(Statistic.DAMAGE_DEALT.toString(), 0L);
         this.x.put(Statistic.DAMAGE_TAKEN.toString(), 0L);
@@ -150,556 +129,145 @@ public class ZPlayer {
         this.x.put("z:mob_kind", 0L);
         this.x.put("z:slain_kind", 0L);
         this.x.put("z:last_played", 0L);
+    }
 
-        //Not thread safe, cannot do it asynchronously
+    public void updateStat(Connection connection) throws SQLException { //Should be called Asynchronously
+        this.is_updating = true;
+        //Clear existing Stats
+        this.clearStat();
+
+        //Rewrite with the latest stats
         OfflinePlayer p = Bukkit.getOfflinePlayer(this.uuid);
         for(Map.Entry<String, Long> me:x.entrySet()){
             String k = me.getKey();
             if(!k.contains("z:")){
-                x.put(k, (long) p.getStatistic(Statistic.valueOf(k)));
+                this.x.put(k, (long) p.getStatistic(Statistic.valueOf(k)));
             }else if(k.equals("z:last_played")){
-                x.put(k, last_played);
+                this.x.put(k, last_played);
             }
         }
-        /*
-        this.x.forEach((k,v) ->{
-            if(!k.contains("z:")){
-                x.put(k, (long) p.getStatistic(Statistic.valueOf(k)));
-            }else if(k.equals("z:last_played")){
-                x.put(k, last_played);
-            }
-        });
-        */
-
-        //substat for item crafted, mined and placed
-        HashMap<Material, Long> cr = new HashMap<>();
-        HashMap<Material, Long> mn = new HashMap<>();
-        HashMap<Material, Long> pl = new HashMap<>();
-
-        for(Material m: Material.values()) {
-            long x = p.getStatistic(Statistic.CRAFT_ITEM, m);
-            long y = p.getStatistic(Statistic.MINE_BLOCK, m);
-            long z = p.getStatistic(Statistic.USE_ITEM, m);
-            if (x != 0) {
-                this.x.put("z:craft_kind", this.x.get("z:craft_kind")+1);
-                this.x.put("z:crafted", this.x.get("z:crafted")+x);
-                cr.put(m, x);
-            }
-            if (y != 0) {
-                this.x.put("z:mine_kind", this.x.get("z:mine_kind")+1);
-                this.x.put("z:mined", this.x.get("z:mined")+y);
-                mn.put(m, y);
-            }
-            if (z != 0 && !ZFilter.is_tool(m)) {
-                this.x.put("z:place_kind", this.x.get("z:place_kind")+1);
-                this.x.put("z:placed", this.x.get("z:placed")+z);
-                pl.put(m, z);
-            }else{
-                if(m.toString().contains("_PICKAXE")){
-                    this.x.put("z:pickaxe", this.x.get("z:pickaxe")+z);
-                }else if(m.toString().contains("_AXE")){
-                    this.x.put("z:axe", this.x.get("z:axe")+z);
-                }else if(m.toString().contains("_SHOVEL")){
-                    this.x.put("z:shovel", this.x.get("z:shovel")+z);
-                }else if(m.toString().contains("_HOE")){
-                    this.x.put("z:hoe", this.x.get("z:hoe")+z);
-                }else if(m.toString().contains("_SWORD")){
-                    this.x.put("z:sword", this.x.get("z:sword")+z);
-                }else if(m.equals(Material.BOW)){
-                    this.x.put("z:bow", this.x.get("z:bow")+z);
-                }else if(m.equals(Material.TRIDENT)){
-                    this.x.put("z:trident", this.x.get("z:trident")+z);
-                }
-            }
-        }
-        if(Zstats.debug) System.out.println("Materials substat done");
-
-        //substat for kill and killed by
-        HashMap<EntityType, Long> k = new HashMap<>();
-        HashMap<EntityType, Long> kb = new HashMap<>();
-
-        for(EntityType t: EntityType.values()){
-            try {
-                if(t.isAlive()) {
-                    long x = p.getStatistic(Statistic.KILL_ENTITY, t);
-                    long y = p.getStatistic(Statistic.ENTITY_KILLED_BY, t);
-                    if (x != 0) {
-                        this.x.put("z:mob_kind", this.x.get("z:mob_kind") + 1);
-                        k.put(t, x);
-                    }
-                    if (y != 0) {
-                        this.x.put("z:slain_kind", this.x.get("z:slain_kind") + 1);
-                        kb.put(t, y);
-                    }
-                }
-            } catch (IllegalArgumentException e) {
-                e.printStackTrace();
-            }
-        }
-        if(Zstats.debug) System.out.println("EntityType substat done");
 
         //server world save size
-        Zstats.end_size = 0L;
-        Zstats.nether_size = 0L;
-        Zstats.world_size = 0L;
-        Zstats.total_size = 0L;
+        Zstats.updateWorldSize();
 
-        Bukkit.getWorlds().forEach(i ->{
-            switch(i.getEnvironment()){
-                case NORMAL:
-                    Zstats.world_size = FileUtils.sizeOfDirectory(i.getWorldFolder());
-                    Zstats.total_size += Zstats.world_size;
-                    break;
-                case NETHER:
-                    Zstats.nether_size = FileUtils.sizeOfDirectory(i.getWorldFolder());
-                    Zstats.total_size += Zstats.nether_size;
-                    break;
-                case THE_END:
-                    Zstats.end_size = FileUtils.sizeOfDirectory(i.getWorldFolder());
-                    Zstats.total_size += Zstats.end_size;
-                    break;
-                default:
-                    Zstats.total_size += Zstats.total_size;
-                    break;
-            }
-            if(Zstats.debug) System.out.println("Got world size of "+i.getName());
-        });
-        if(Zstats.debug) System.out.println("Total size "+Zstats.total_size);
+        //substats
+        Substats s = new Substats(this);
+        s.substats_Material();
+        s.substats_Entity();
+        s.sort_substats();
 
-        //update to SQL asynchronously
-        BukkitRunnable r = new BukkitRunnable() {
-            @Override
-            public void run() {
-                PreparedStatement pss = null;
-                ResultSet rs = null;
-                PreparedStatement ps = null;
-                try {
-                    //World Size
-                    pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                    pss.setString(1, "000");
-                    pss.setString(2, "z:world_size");
-                    rs = pss.executeQuery();
-                    ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                    ps.setLong(1, Zstats.world_size);
-                    ps.setString(2, "000");
-                    ps.setString(3, "z:world_size");
-                    if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:world_size" + " - " + Zstats.world_size);
-                    ps.executeUpdate();
+        //Update to SQL
+        //World Size
+        this.SQL_query(connection, Zstats.world_size, "000", "z:world_size");
 
-                    //Nether Size
-                    pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                    pss.setString(1, "000");
-                    pss.setString(2, "z:nether_size");
-                    rs = pss.executeQuery();
-                    ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                    ps.setLong(1, Zstats.nether_size);
-                    ps.setString(2, "000");
-                    ps.setString(3, "z:nether_size");
-                    if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:nether_size" + " - " + Zstats.nether_size);
-                    ps.executeUpdate();
+        //Nether Size
+        this.SQL_query(connection, Zstats.nether_size, "000", "z:nether_size");
 
-                    //The End Size
-                    pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                    pss.setString(1, "000");
-                    pss.setString(2, "z:end_size");
-                    rs = pss.executeQuery();
-                    ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                    ps.setLong(1, Zstats.end_size);
-                    ps.setString(2, "000");
-                    ps.setString(3, "z:end_size");
-                    if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:end_size" + " - " + Zstats.end_size);
-                    ps.executeUpdate();
+        //The End Size
+        this.SQL_query(connection, Zstats.end_size, "000", "z:end_size");
 
-                    //Total Size
-                    pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                    pss.setString(1, "000");
-                    pss.setString(2, "z:total_size");
-                    rs = pss.executeQuery();
-                    ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                    ps.setLong(1, Zstats.total_size);
-                    ps.setString(2, "000");
-                    ps.setString(3, "z:total_size");
-                    if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:total_size" + " - " + Zstats.total_size);
-                    ps.executeUpdate();
+        //Total Size
+        this.SQL_query(connection, Zstats.total_size, "000", "z:total_size");
 
-                    //AFK time
-                    pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                    pss.setString(1, uuid.toString());
-                    pss.setString(2, "z:afk_time");
-                    rs = pss.executeQuery();
-                    ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                    ps.setLong(1, afk_time);
-                    ps.setString(2, uuid.toString());
-                    ps.setString(3, "z:afk_time");
-                    if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:afk_time" + " - " + afk_time);
-                    ps.executeUpdate();
+        //AFK time
+        this.SQL_query(connection, afk_time, uuid.toString(), "z:afk_time");
 
-                    //General stats
-                    for(Map.Entry<String, Long> me:x.entrySet()){
-                        String k = me.getKey();
-                        long v = me.getValue();
+        //General stats
+        for(Map.Entry<String, Long> me:this.x.entrySet()){
+            String k = me.getKey();
+            long v = me.getValue();
+            this.SQL_query(connection, v, uuid.toString(), k);
+        }
 
-                        pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, k);
-                        rs = pss.executeQuery();
-                        ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                    }
+        //Crafting stats
+        int j = 1;
+        for(Map.Entry<Material, Long> me:this.craft.entrySet()){
+            Material k = me.getKey();
+            long v = me.getValue();
+            this.SQL_query(connection, v, uuid.toString(), "z:craft_", k.toString(), j);
+            j++;
+        }
 
-                    //Crafting stats
-                    int j = 1;
-                    for(Map.Entry<Material, Long> me:craft.entrySet()){
-                        Material k = me.getKey();
-                        long v = me.getValue();
+        //Placed items/blocks stats
+        j = 1;
+        for(Map.Entry<Material, Long> me:this.place.entrySet()){
+            Material k = me.getKey();
+            long v = me.getValue();
+            this.SQL_query(connection, v, uuid.toString(), "z:place_", k.toString(), j);
+            j++;
+        }
 
-                        pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:craft_" + j + "_%");
-                        pss.executeUpdate();
-                        ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:craft_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:craft_" + j + "_" + k + " - " + v);
-                        j++;
-                    }
+        //Mined blocks stats
+        j = 1;
+        for(Map.Entry<Material, Long> me:this.mine.entrySet()){
+            Material k = me.getKey();
+            long v = me.getValue();
+            this.SQL_query(connection, v, uuid.toString(), "z:mine_", k.toString(), j);
+            j++;
+        }
 
-                    //Placed items/blocks stats
-                    j = 1;
-                    for(Map.Entry<Material, Long> me:place.entrySet()){
-                        Material k = me.getKey();
-                        long v = me.getValue();
+        //Killing stats
+        j = 1;
+        for(Map.Entry<EntityType, Long> me:this.mob.entrySet()){
+            EntityType k = me.getKey();
+            long v = me.getValue();
+            this.SQL_query(connection, v, uuid.toString(), "z:mob_", k.toString(), j);
+            j++;
+        }
 
-                        pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:place_" + j + "_%");
-                        pss.executeUpdate();
-                        ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:place_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:place_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        j++;
-                    }
+        //Slain stats
+        j = 1;
+        for(Map.Entry<EntityType, Long> me:this.slain.entrySet()){
+            EntityType k = me.getKey();
+            long v = me.getValue();
+            this.SQL_query(connection, v, uuid.toString(), "z:slain_", k.toString(), j);
+            j++;
+        }
 
-                    //Mined blocks stats
-                    j = 1;
-                    for(Map.Entry<Material, Long> me:mine.entrySet()){
-                        Material k = me.getKey();
-                        long v = me.getValue();
-
-                        pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:mine_" + j + "_%");
-                        pss.executeUpdate();
-                        ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:mine_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:mine_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        j++;
-                    }
-
-                    //Killing stats
-                    j = 1;
-                    for(Map.Entry<EntityType, Long> me:mob.entrySet()){
-                        EntityType k = me.getKey();
-                        long v = me.getValue();
-
-                        pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:mob_" + j + "_%");
-                        pss.executeUpdate();
-                        ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:mob_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:mob_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        j++;
-                    }
-
-                    //Slain stats
-                    j = 1;
-                    for(Map.Entry<EntityType, Long> me:slain.entrySet()){
-                        EntityType k = me.getKey();
-                        long v = me.getValue();
-
-                        pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:slain_" + j + "_%");
-                        pss.executeUpdate();
-                        ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:slain_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:slain_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        j++;
-                    }
-
-                } catch (SQLException throwables) {
-                    throwables.printStackTrace();
-                } finally {
-                    try {
-                        assert pss != null;
-                        pss.close();
-
-                        assert rs != null;
-                        rs.close();
-
-                        assert ps != null;
-                        ps.close();
-                    } catch (Exception e) {
-                        if(Zstats.debug) System.out.println("[Zstats] "+ e );
-                    }
-                }
-                /*
-                x.forEach((k, v) -> {
-                    try {
-                        PreparedStatement pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, k);
-                        ResultSet rs = pss.executeQuery();
-                        final PreparedStatement ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
-                    }
-                });
-
-                AtomicInteger counter = new AtomicInteger(1);
-                craft.forEach((k, v) -> {
-                    int j = counter.intValue();
-                    try {
-                        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:craft_" + j + "_%");
-                        pss.executeUpdate();
-                        final PreparedStatement ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:craft_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:craft_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                        counter.getAndIncrement();
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
-                    }
-                });
-
-                counter.set(1);
-                place.forEach((k, v) -> {
-                    int j = counter.intValue();
-                    try {
-                        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:place_" + j + "_%");
-                        pss.executeUpdate();
-                        final PreparedStatement ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:place_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:place_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                        counter.getAndIncrement();
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
-                    }
-                });
-
-                counter.set(1);
-                mine.forEach((k, v) -> {
-                    int j = counter.intValue();
-                    try {
-                        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:mine_" + j + "_%");
-                        pss.executeUpdate();
-                        final PreparedStatement ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:mine_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:mine_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                        counter.getAndIncrement();
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
-                    }
-                });
-
-                counter.set(1);
-                mob.forEach((k, v) -> {
-                    int j = counter.intValue();
-                    try {
-                        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:mob_" + j + "_%");
-                        pss.executeUpdate();
-                        final PreparedStatement ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:mob_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:mob_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                        counter.getAndIncrement();
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
-                    }
-                });
-
-                counter.set(1);
-                slain.forEach((k, v) -> {
-                    int j = counter.intValue();
-                    try {
-                        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
-                        pss.setString(1, uuid.toString());
-                        pss.setString(2, "z:slain_" + j + "_%");
-                        pss.executeUpdate();
-                        final PreparedStatement ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
-                        pss.close();
-                        ps.setLong(1, v);
-                        ps.setString(2, uuid.toString());
-                        ps.setString(3, "z:slain_" + j + "_" + k);
-                        if (Zstats.debug) System.out.println(uuid.toString() + " - " + "z:slain_" + j + "_" + k + " - " + v);
-                        ps.executeUpdate();
-                        ps.close();
-                        counter.getAndIncrement();
-                    } catch (SQLException throwables) {
-                        throwables.printStackTrace();
-                    }
-                });
-                */
-
-                System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET + " Update stats of " + uuid.toString() + " associates with " + name + " done.");
-                if(Zstats.notify_discord && Zstats.has_discordSrv){
-                    DiscordSRV.getPlugin().getDestinationTextChannelForGameChannelName("global")
-                            .sendMessage(Zstats.notify_discord_message.replaceAll("<player>".toLowerCase(), name))
-                            .queue();
-                }
-            }
-        };
-
-        //sort substats asynchronously
-        BukkitRunnable a = new BukkitRunnable() {
-            @Override
-            public void run() {
-                if(Zstats.debug) System.out.println("Sorting substats...");
-                if(x.get("z:craft_kind") != 0){
-                    LinkedHashMap temp = ZFilter.sortByValues(cr);
-                    Iterator x = temp.entrySet().iterator();
-                    for(int i=0; i<3; i++){
-                        if(x.hasNext()){
-                            Map.Entry e = (Map.Entry) x.next();
-                            craft.put((Material) e.getKey(), (Long) e.getValue());
-                        }else{
-                            craft.put(null, 0L);
-                        }
-                    }
-                }
-                if(x.get("z:place_kind") != 0){
-                    LinkedHashMap temp = ZFilter.sortByValues(pl);
-                    Iterator x = temp.entrySet().iterator();
-                    for(int i=0; i<3; i++){
-                        if(x.hasNext()){
-                            Map.Entry e = (Map.Entry) x.next();
-                            place.put((Material) e.getKey(), (Long) e.getValue());
-                        }else{
-                            place.put(null, 0L);
-                        }
-                    }
-                }
-                if(x.get("z:mine_kind") != 0){
-                    LinkedHashMap temp = ZFilter.sortByValues(mn);
-                    Iterator x = temp.entrySet().iterator();
-                    for(int i=0; i<3; i++){
-                        if(x.hasNext()){
-                            Map.Entry e = (Map.Entry) x.next();
-                            mine.put((Material) e.getKey(), (Long) e.getValue());
-                        }else{
-                            mine.put(null, 0L);
-                        }
-                    }
-                }
-                if(x.get("z:mob_kind") != 0){
-                    LinkedHashMap temp = ZFilter.sortByValues(k);
-                    Iterator x = temp.entrySet().iterator();
-                    for(int i=0; i<3; i++){
-                        if(x.hasNext()){
-                            Map.Entry e = (Map.Entry) x.next();
-                            mob.put((EntityType) e.getKey(), (Long) e.getValue());
-                        }else{
-                            mob.put(null, 0L);
-                        }
-                    }
-                }
-                if(x.get("z:slain_kind") != 0){
-                    LinkedHashMap temp = ZFilter.sortByValues(kb);
-                    Iterator x = temp.entrySet().iterator();
-                    for(int i=0; i<3; i++){
-                        if(x.hasNext()){
-                            Map.Entry e = (Map.Entry) x.next();
-                            slain.put((EntityType) e.getKey(), (Long) e.getValue());
-                        }else{
-                            slain.put(null, 0L);
-                        }
-                    }
-                }
-                if(Zstats.debug) System.out.println("Sorting substats done");
-                r.runTaskAsynchronously(Zstats.getPlugin(Zstats.class));
-            }
-        };
-        a.runTaskAsynchronously(Zstats.getPlugin(Zstats.class));
+        System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET + " Update stats of " + uuid.toString() + " associates with " + name + " done.");
+        this.is_updating = false;
     }
 
-    public void deleteStat(Connection connection){
-        //delete from SQL asynchronously
-        BukkitRunnable r = new BukkitRunnable() {
-            @Override
-            public void run() {
-                PreparedStatement pss = null;
-                try {
-                    System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET + " Deleting stats of " + uuid.toString() + " associates with " + name + " from database...");
-                    pss = connection.prepareStatement("delete from stats where uuid=?");
-                    pss.setString(1, uuid.toString());
-                    int row = pss.executeUpdate();
-                    System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET +
-                            (row > 0 ? " Deleted stats of " + uuid.toString() + " associates with " + name + " from database." : " No stats of "  + uuid.toString() + " associates with " + name + " found on the database. No rows affected."));
-                } catch (SQLException throwables) {
-                    throwables.printStackTrace();
-                } finally {
-                    try {
-                        assert pss != null;
-                        pss.close();
-                    } catch (Exception e) {
-                        if(Zstats.debug) System.out.println("[Zstats] "+ e );
-                    }
-                }
-            }
-        };
-        r.runTaskAsynchronously(Zstats.getPlugin(Zstats.class));
+    public void deleteStat(Connection connection) throws SQLException { //Should be called Asynchronously
+        //delete from SQL
+        if(this.is_updating) return;
+        System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET + " Deleting stats of " + uuid.toString() + " associates with " + name + " from database...");
+        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=?");
+        pss.setString(1, uuid.toString());
+        int row = pss.executeUpdate();
+        System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET +
+                (row > 0 ? " Deleted stats of " + uuid.toString() + " associates with " + name + " from database." : " No stats of "  + uuid.toString() + " associates with " + name + " found on the database. No rows affected."));
+        pss.close();
+    }
+
+    private void SQL_query(Connection connection, long val, String uuid, String stat) throws SQLException{ //For general stats
+        PreparedStatement pss = connection.prepareStatement("select * from stats where uuid=? and stat=?");
+        pss.setString(1, uuid);
+        pss.setString(2, stat);
+        ResultSet rs = pss.executeQuery();
+        PreparedStatement ps = connection.prepareStatement(rs.next() ? "update stats set val=? where uuid=? and stat=?" : "insert into stats(val, uuid, stat) values (?, ?, ?)");
+        ps.setLong(1, val);
+        ps.setString(2, uuid);
+        ps.setString(3, stat);
+        if (Zstats.debug) System.out.println(uuid + " - " + stat + " - " + val);
+        ps.executeUpdate();
+        pss.close();
+        rs.close();
+        ps.close();
+    }
+
+    private void SQL_query(Connection connection, long val, String uuid, String stat, String substat, int j) throws SQLException{ //For substats
+        PreparedStatement pss = connection.prepareStatement("delete from stats where uuid=? and stat like ?");
+        pss.setString(1, uuid);
+        pss.setString(2, stat + j + "_%");
+        pss.executeUpdate();
+        PreparedStatement ps = connection.prepareStatement("insert into stats(val, uuid, stat) values (?, ?, ?)");
+        ps.setLong(1, val);
+        ps.setString(2, uuid);
+        ps.setString(3, stat + j + "_" + substat);
+        ps.execute();
+        if (Zstats.debug) System.out.println(uuid + " - " + stat + j + "_" + substat + " - " + val);
+        pss.close();
+        ps.close();
     }
 }

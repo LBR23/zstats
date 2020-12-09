@@ -1,5 +1,6 @@
 package zerrium;
 
+import github.scarsz.discordsrv.DiscordSRV;
 import net.ess3.api.IUser;
 import net.ess3.api.events.AfkStatusChangeEvent;
 import org.bukkit.ChatColor;
@@ -23,14 +24,14 @@ public class SpigotListener implements Listener {
         String name = p.getName();
         Zstats.online_player.put(uuid, name);
         if(!Zstats.zplayer.contains(new ZPlayer(uuid))){
-            Zstats.zplayer.add(new ZPlayer(uuid, name));
-            System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET + " Found a new player with uuid of " + uuid.toString() + " associates with " + name);
             BukkitRunnable r = new BukkitRunnable() {
                 @Override
                 public void run() {
                     Connection connection = null;
                     PreparedStatement ps = null;
                     try {
+                        Zstats.zplayer.add(new ZPlayer(uuid, name));
+                        System.out.println(ChatColor.YELLOW + "[Zstats]" + ChatColor.RESET + " Found a new player with uuid of " + uuid.toString() + " associates with " + name);
                         connection = SqlCon.openConnection();
                         ps = connection.prepareStatement("insert into player(uuid,name) values (?,?)");
                         ps.setString(1, uuid.toString());
@@ -63,21 +64,33 @@ public class SpigotListener implements Listener {
         if(Zstats.debug) System.out.println(Zstats.online_player);
         System.out.println(ChatColor.YELLOW + "[Zstats] " + ChatColor.RESET + name + " left the game. Updating stats...");
         ZPlayer zp = Zstats.zplayer.get(Zstats.zplayer.indexOf(new ZPlayer(uuid)));
+        if(zp.is_updating) return;
         zp.last_played = System.currentTimeMillis()/1000;
-        Connection connection = null;
-        try {
-            connection = SqlCon.openConnection();
-            zp.updateStat(connection);
-        } catch (SQLException throwables) {
-            throwables.printStackTrace();
-        } finally {
-            try {
-                assert connection != null;
-                connection.close();
-            } catch (Exception e) {
-                if(Zstats.debug) System.out.println("[Zstats] "+ e );
+        BukkitRunnable r = new BukkitRunnable() {
+            @Override
+            public void run() {
+                Connection connection = null;
+                try {
+                    connection = SqlCon.openConnection();
+                    zp.updateStat(connection);
+                    if(Zstats.notify_discord && Zstats.has_discordSrv){
+                        DiscordSRV.getPlugin().getDestinationTextChannelForGameChannelName("global")
+                                .sendMessage(Zstats.notify_discord_message.replaceAll("<player>".toLowerCase(), name))
+                                .queue();
+                    }
+                } catch (SQLException throwables) {
+                    throwables.printStackTrace();
+                } finally {
+                    try {
+                        assert connection != null;
+                        connection.close();
+                    } catch (Exception e) {
+                        if(Zstats.debug) System.out.println("[Zstats] "+ e );
+                    }
+                }
             }
-        }
+        };
+        r.runTaskAsynchronously(Zstats.getPlugin(Zstats.class));
     }
 
     @EventHandler
